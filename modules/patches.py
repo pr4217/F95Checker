@@ -55,7 +55,10 @@ def apply():
     import py7zr
     import rarfile
     import shutil
-    import zipfile_deflate64
+    try:
+        import zipfile_deflate64  # noqa: F401 - registers deflate64 zip support as a side-effect
+    except ImportError:
+        pass
     shutil.register_unpack_format("7zip", [".7z"], py7zr.unpack_7zarchive)
     def unpack_rarfile(archive, path):
         if not rarfile.is_rarfile(archive):

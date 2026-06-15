@@ -99,6 +99,19 @@ def is_uri(text: str):
     return bool(re.search(r"^[A-Za-z][A-Za-z0-9\+\-\.]*://", text))
 
 
+_VERSION_NOISE_RE = re.compile(
+    r'[\s_-]+(public|beta|alpha|ea|early.?access|fix\d*|hotfix\d*|patch\d*|build\d*|demo|preview|final|release).*$',
+    re.IGNORECASE
+)
+
+def normalize_version(v: str) -> str:
+    """Strip v-prefix and common release-tag suffixes for fuzzy version equality checks."""
+    v = v.strip()
+    v = re.sub(r'^[vV]\.?', '', v)
+    v = _VERSION_NOISE_RE.sub('', v)
+    return v.strip()
+
+
 def is_refreshing():
     if globals.refresh_task and not globals.refresh_task.done():
         return True
