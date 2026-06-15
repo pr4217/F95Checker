@@ -1435,6 +1435,37 @@ class MainGUI():
             imgui.same_line()
             imgui.text(label + " ")
 
+    def draw_game_set_installed_version_button(self, game: Game, label="", selectable=False):
+        if not game:
+            return
+        clicked = imgui.selectable(label, False)[0] if selectable else imgui.button(label)
+        if clicked:
+            version_obj = builtins.type("_", (), dict(_=game.installed or game.version))()
+            def popup_content():
+                imgui.text("Set the installed version string:")
+                imgui.set_next_item_width(self.scaled(300))
+                _, version_obj._ = imgui.input_text("###set_installed_version", version_obj._)
+                imgui.text_disabled("Leave blank to mark as not installed.")
+            def apply_version():
+                v = version_obj._.strip()
+                if v:
+                    game.add_timeline_event(TimelineEventType.GameInstalled, v)
+                    game.installed = v
+                    game.updated = utils.normalize_version(v) != utils.normalize_version(game.version)
+                else:
+                    game.installed = ""
+                    game.updated = False
+            utils.push_popup(
+                utils.popup, f"Set installed version for {game.name}",
+                popup_content,
+                buttons={
+                    f"{icons.check} Ok": apply_version,
+                    f"{icons.cancel} Cancel": None,
+                },
+                closable=True,
+                outside=False,
+            )
+
     def draw_game_rating_widget(self, game: Game):
         if not game:
             imgui.text("Set:")
@@ -1726,6 +1757,7 @@ class MainGUI():
         imgui.separator()
         self.draw_game_finished_checkbox(game, f"{icons.flag_checkered} Finished")
         self.draw_game_installed_checkbox(game, f"{icons.download} Installed")
+        self.draw_game_set_installed_version_button(game, f"{icons.pencil_plus_outline} Set Version...", selectable=True)
         imgui.separator()
         self.draw_game_rating_widget(game)
         if imgui.begin_menu(f"{icons.label_multiple_outline} Labels"):
@@ -4770,6 +4802,243 @@ class MainGUI():
                 file_hover = file_hover or imgui.is_item_hovered()
                 if file_hover:
                     self.draw_hover_text("You can also drag and drop .html and .url files into the window for this!", text=None, force=True)
+                if imgui.button("Game folder", width=-offset):
+                    def folder_callback(selected):
+                        if not selected:
+                            return
+                        folder_path = pathlib.Path(selected)
+                        results = callbacks.scan_game_folder(folder_path)
+                        if not results:
+                            utils.push_popup(
+                                msgbox.msgbox, "No folders found",
+                                f"No subdirectories were found in:\n{selected}",
+                                MsgBox.warn,
+                            )
+                            return
+                        def popup_content():
+                            # Kick off searches for rows that still need them (max 5 concurrent)
+                            concurrent_searches = sum(1 for r in results if r['is_searching'])
+                            if concurrent_searches < 5:
+                                for r in results:
+                                    if concurrent_searches >= 5:
+                                        break
+                                    if r['already_imported'] or r['is_searching']:
+                                        continue
+                                    if r['detected_name'] and r['detected_name'] != r['last_searched_name']:
+                                        async_thread.run(callbacks.search_for_scan_result(r))
+                                        concurrent_searches += 1
+
+                            # Kick off exe scans for rows that haven't been scanned yet
+                            for r in results:
+                                if not r['already_imported'] and not r['is_scanning_exes'] and r['found_exes'] is None:
+                                    async_thread.run(callbacks.scan_exes_for_result(r))
+
+                            n_imported = sum(1 for r in results if r['already_imported'])
+                            n_ready = sum(1 for r in results if r.get('apply') and r['selected_idx'] >= 0 and not r['already_imported'])
+                            imgui.text(
+                                f"Found {len(results)} folder(s) — {n_imported} already in library, "
+                                f"{n_ready} selected for import. Edit names to refine search."
+                            )
+                            imgui.separator()
+                            table_flags = (
+                                imgui.TABLE_SCROLL_Y |
+                                imgui.TABLE_ROW_BACKGROUND |
+                                imgui.TABLE_BORDERS_INNER_VERTICAL
+                            )
+                            if imgui.begin_table("###scan_results", 6, flags=table_flags, outer_size_height=self.scaled(400)):
+                                imgui.table_setup_scroll_freeze(0, 1)
+                                imgui.table_setup_column("Folder", imgui.TABLE_COLUMN_WIDTH_STRETCH)
+                                imgui.table_setup_column("Search Name", imgui.TABLE_COLUMN_WIDTH_STRETCH)
+                                imgui.table_setup_column("Version", imgui.TABLE_COLUMN_WIDTH_FIXED, self.scaled(90))
+                                imgui.table_setup_column("F95zone Match", imgui.TABLE_COLUMN_WIDTH_STRETCH)
+                                imgui.table_setup_column("Executable", imgui.TABLE_COLUMN_WIDTH_STRETCH)
+                                imgui.table_setup_column("Import", imgui.TABLE_COLUMN_NO_RESIZE)
+                                imgui.table_headers_row()
+                                for i, result in enumerate(results):
+                                    imgui.table_next_row()
+                                    if result['already_imported']:
+                                        imgui.push_disabled()
+
+                                    imgui.table_next_column()
+                                    imgui.text_disabled(result['folder_name'])
+
+                                    imgui.table_next_column()
+                                    imgui.set_next_item_width(-imgui.FLOAT_MIN)
+                                    changed, new_name = imgui.input_text(f"###scan_name_{i}", result['detected_name'])
+                                    if changed and not result['already_imported']:
+                                        result['detected_name'] = new_name
+
+                                    imgui.table_next_column()
+                                    imgui.set_next_item_width(-imgui.FLOAT_MIN)
+                                    changed, new_ver = imgui.input_text(f"###scan_ver_{i}", result['detected_version'])
+                                    if changed and not result['already_imported']:
+                                        result['detected_version'] = new_ver
+
+                                    imgui.table_next_column()
+                                    imgui.set_next_item_width(-imgui.FLOAT_MIN)
+                                    if result['already_imported']:
+                                        imgui.text_disabled("Already in library")
+                                    elif not result['detected_name']:
+                                        imgui.text_disabled("(enter a name to search)")
+                                    elif result['search_results'] is None:
+                                        imgui.text_disabled("Searching..." if result['is_searching'] else "Pending...")
+                                    elif not result['search_results']:
+                                        imgui.text_disabled("No results")
+                                    else:
+                                        titles = [sr.title for sr in result['search_results']]
+                                        idx = max(0, result['selected_idx'])
+                                        changed, new_idx = imgui.combo(f"###scan_match_{i}", idx, titles)
+                                        if changed:
+                                            result['selected_idx'] = new_idx
+                                            if result['search_results'][new_idx].id in globals.games:
+                                                result['already_imported'] = True
+
+                                    imgui.table_next_column()
+                                    imgui.set_next_item_width(-imgui.FLOAT_MIN)
+                                    found_exes = result['found_exes']
+                                    sel_exe = result['selected_exe_idx']
+                                    if result['already_imported']:
+                                        imgui.text_disabled("—")
+                                    elif found_exes is None:
+                                        imgui.text_disabled("Scanning..." if result['is_scanning_exes'] else "Pending...")
+                                    else:
+                                        PICK_MANUALLY = len(found_exes)
+                                        # Labels: relative path from subdir, then "Pick manually..."
+                                        subdir = result['subdir']
+                                        exe_labels = []
+                                        for ep in found_exes:
+                                            try:
+                                                rel = pathlib.Path(ep).relative_to(subdir)
+                                            except ValueError:
+                                                rel = pathlib.Path(ep).name
+                                            exe_labels.append(str(rel))
+                                        exe_labels.append(f"{icons.folder_open_outline} Pick manually...")
+                                        combo_idx = max(0, sel_exe) if sel_exe >= 0 else PICK_MANUALLY
+                                        changed, new_exe_idx = imgui.combo(f"###scan_exe_{i}", combo_idx, exe_labels)
+                                        if changed:
+                                            if new_exe_idx == PICK_MANUALLY:
+                                                def _make_exe_callback(r):
+                                                    def _cb(selected):
+                                                        if selected:
+                                                            if selected not in r['found_exes']:
+                                                                r['found_exes'].append(selected)
+                                                            r['selected_exe_idx'] = r['found_exes'].index(selected)
+                                                    return _cb
+                                                utils.push_popup(filepicker.FilePicker(
+                                                    title="Select executable",
+                                                    start_dir=str(subdir),
+                                                    callback=_make_exe_callback(result),
+                                                ).tick)
+                                            else:
+                                                result['selected_exe_idx'] = new_exe_idx
+
+                                    imgui.table_next_column()
+                                    can_import = not result['already_imported'] and result['selected_idx'] >= 0
+                                    extra_disable = not can_import and not result['already_imported']
+                                    if extra_disable:
+                                        imgui.push_disabled()
+                                    cb_val = result.get('apply', False) and can_import
+                                    changed, new_val = imgui.checkbox(f"###scan_import_{i}", cb_val)
+                                    if changed and can_import:
+                                        result['apply'] = new_val
+                                    if extra_disable:
+                                        imgui.pop_disabled()
+
+                                    if result['already_imported']:
+                                        imgui.pop_disabled()
+                                imgui.end_table()
+
+                        def do_import():
+                            to_import = [
+                                r for r in results
+                                if r.get('apply') and r['selected_idx'] >= 0
+                                and not r['already_imported'] and r['search_results']
+                            ]
+                            if not to_import:
+                                return
+
+                            # Group rows by chosen F95zone game ID so multiple folders
+                            # pointing at the same game merge into one library entry.
+                            by_game_id = {}
+                            for result in to_import:
+                                chosen = result['search_results'][result['selected_idx']]
+                                gid = chosen.id
+                                fexes = result['found_exes'] or []
+                                sel = result['selected_exe_idx']
+                                exe = fexes[sel] if 0 <= sel < len(fexes) else None
+                                if gid not in by_game_id:
+                                    by_game_id[gid] = {
+                                        'thread': chosen,
+                                        'version': result['detected_version'],
+                                        'exes': [],
+                                    }
+                                if exe:
+                                    by_game_id[gid]['exes'].append(exe)
+
+                            def _run_import():
+                                for info in by_game_id.values():
+                                    async_thread.run(callbacks.add_game_with_installed_version(
+                                        info['thread'],
+                                        info['version'],
+                                        info['exes'] or None,
+                                    ))
+
+                            has_exes = any(info['exes'] for info in by_game_id.values())
+                            if not globals.settings.default_exe_dir.get(globals.os) and has_exes:
+                                def _set_and_import(selected):
+                                    if selected:
+                                        globals.settings.default_exe_dir[globals.os] = selected
+                                        async_thread.run(db.update_settings("default_exe_dir"))
+                                        _run_import()
+                                    # If user cancelled the dir picker, do nothing —
+                                    # they can use "Import anyway" if they want absolute paths.
+
+                                def _prompt_content():
+                                    imgui.text_wrapped(
+                                        "No default game folder is set.\n\n"
+                                        "Setting one stores executable paths relative to a base "
+                                        "directory, making your library portable if you move your "
+                                        "games later."
+                                    )
+
+                                utils.push_popup(
+                                    utils.popup, "Default game folder not set",
+                                    _prompt_content,
+                                    buttons={
+                                        f"{icons.folder_open_outline} Set folder": lambda: utils.push_popup(
+                                            filepicker.DirPicker(
+                                                title="Select default game folder",
+                                                callback=_set_and_import,
+                                            ).tick
+                                        ),
+                                        f"{icons.download} Import anyway": _run_import,
+                                        f"{icons.cancel} Cancel": None,
+                                    },
+                                    closable=True,
+                                    outside=False,
+                                )
+                            else:
+                                _run_import()
+                        utils.push_popup(
+                            utils.popup, "Game folder scan results",
+                            popup_content,
+                            buttons={
+                                f"{icons.download} Import Selected": do_import,
+                                f"{icons.cancel} Cancel": None,
+                            },
+                            closable=True,
+                            outside=False,
+                        )
+                    utils.push_popup(filepicker.FilePicker(
+                        title="Select game library folder",
+                        dir_picker=True,
+                        callback=folder_callback,
+                    ).tick)
+                self.draw_hover_text(
+                    "Scan a folder of games: F95Checker will try to detect the game name and version\n"
+                    "from each subfolder name, then match them to games in your library.",
+                    text=None,
+                )
                 imgui.tree_pop()
             if imgui.tree_node("Export", flags=imgui.TREE_NODE_SPAN_AVAILABLE_WIDTH):
                 offset = imgui.get_cursor_pos_x() - pos.x

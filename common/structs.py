@@ -985,8 +985,12 @@ class Game:
             self.custom = bool(self.status is Status.Custom)
         if self.id < 0:
             self.custom = True
-        if self.updated is None:
-            self.updated = bool(self.installed) and self.installed != self.version
+        if self.updated is None or self.updated is True:
+            from modules import utils
+            if self.installed and self.version:
+                self.updated = utils.normalize_version(self.installed) != utils.normalize_version(self.version)
+            elif self.updated is None:
+                self.updated = False
         if self.image_url == "-":
             self.image_url = "missing"
         if self.finished == "True" and self.installed != "True" and self.version != "True":

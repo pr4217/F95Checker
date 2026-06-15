@@ -598,3 +598,190 @@ async def add_games(*threads: list[ThreadMatch | SearchResult]):
         )
     else:
         await _add_games()
+
+
+async def add_game_with_installed_version(thread, installed_version: str, executables: list[str] = None):
+    """Add a game from a search result, then set its installed version and executables."""
+    await add_games(thread)
+    if thread.id in globals.games:
+        game = globals.games[thread.id]
+        if installed_version:
+            game.add_timeline_event(TimelineEventType.GameInstalled, installed_version)
+            game.installed = installed_version
+            game.updated = utils.normalize_version(installed_version) != utils.normalize_version(game.version)
+        if executables:
+            game.executables = executables
+            game.validate_executables()  # relativizes paths against default_exe_dir if set
+
+
+async def search_for_scan_result(result: dict):
+    """Fetch F95zone search results for one scan-result row and update it in place."""
+    result['is_searching'] = True
+    result['last_searched_name'] = result['detected_name']
+    name = result['detected_name']
+    sanitized = api.latest_updates_search_sanitize_query(name)
+    hits = await api.latest_updates_search('games', 'search', sanitized) or []
+    result['search_results'] = hits
+    if hits:
+        result['selected_idx'] = 0
+        if hits[0].id in globals.games:
+            result['already_imported'] = True
+    result['is_searching'] = False
+
+
+async def scan_exes_for_result(result: dict):
+    """Scan the top-level game subfolder for .exe files in a thread and update result in place."""
+    result['is_scanning_exes'] = True
+    subdir: pathlib.Path = result['subdir']
+    raw_name: str = result['raw_name']
+
+    def _do_scan():
+        found = []
+        try:
+            for item in sorted(subdir.iterdir(), key=lambda x: x.name.lower()):
+                if item.is_file() and item.suffix.lower() == '.exe':
+                    found.append(item)
+        except Exception:
+            pass
+        folder_base = re.sub(r'[\s\-_]', '', raw_name).lower()
+        def _priority(p: pathlib.Path):
+            stem = re.sub(r'[\s\-_]', '', p.stem).lower()
+            if stem == folder_base:
+                return (0, p.name.lower())
+            if p.name.lower() == 'game.exe':
+                return (1, p.name.lower())
+            return (2, p.name.lower())
+        found.sort(key=_priority)
+        return [str(p) for p in found]
+
+    loop = asyncio.get_running_loop()
+    found_exes = await loop.run_in_executor(None, _do_scan)
+    result['found_exes'] = found_exes
+    result['selected_exe_idx'] = 0 if found_exes else -1
+    result['is_scanning_exes'] = False
+
+
+# (stop_word, min_chars_that_must_precede_it_in_the_same_token)
+# Sorted longest-first so we don't accidentally match a short word inside a longer one.
+_STOP_WORDS_TRAILING = [
+    ('from', 3), ('into', 3), ('with', 3), ('and', 3),
+    ('the',  3), ('but',  3), ('for',  3), ('nor',  3),
+    ('of',   3), ('an',   4), ('in',   5), ('on',   5),
+]
+
+
+def _split_trailing_stop_words(name: str) -> str:
+    """Peel prepositions/articles stuck to the end of CamelCase tokens, iterating until stable."""
+    prev = None
+    while prev != name:
+        prev = name
+        tokens = name.split()
+        result = []
+        for tok in tokens:
+            lower = tok.lower()
+            for sw, min_before in _STOP_WORDS_TRAILING:
+                if lower.endswith(sw) and len(tok) - len(sw) >= min_before:
+                    tok = tok[:-len(sw)] + ' ' + tok[-len(sw):]
+                    break
+            result.append(tok)
+        name = ' '.join(result)
+    return name
+
+
+def scan_game_folder(folder_path: pathlib.Path):
+    """Scan subdirectories of folder_path and extract game name/version from each folder name."""
+    results = []
+    try:
+        top_items = sorted([d for d in folder_path.iterdir() if d.is_dir()], key=lambda d: d.name.lower())
+    except Exception:
+        return results
+
+    game_dirs = [(item, "") for item in top_items]
+
+    PLATFORM_RE = re.compile(
+        r'[-_\s]+(pc|win|linux|mac|osx|android|WLM|market|Windows|portable|final)$',
+        re.IGNORECASE
+    )
+
+    VERSION_PATTERNS = [
+        (r'(?:[-_\s.])([vV]\.?\d[\d.]*[a-zA-Z]?\d*)(?:[-_\s]|$)', 0),
+        (r'[-_\s]Vers?\.?\s*(\d[\d.]*[a-zA-Z]?\d*)(?:[-_\s]|$)', 0),
+        (r'[-_\s](\d+\.\d[\d.]*[a-zA-Z]?\d*)(?:[-_\s]|$)', 0),
+        (r'[-_\s.](Ch(?:ap)?\.?\d+(?:[-_.\s]*(?:Ep\.?\d+|Alpha[\d.]*|Part\.?\d+|[\d.]+))*)(?:[-_\s.]|$)', 0),
+        (r'[-_\s.](Act\d+(?:[-_.\s]*(?:Part\.?\d+|[\d.]+))*)(?:[-_\s.]|$)', re.IGNORECASE),
+        (r'[-_\s](Update\d+)(?:[-_\s]|$)', re.IGNORECASE),
+        (r'[-_\s](day\d+(?:-\d+)*)(?:[-_\s.]|$)', re.IGNORECASE),
+        (r'(?<=[A-Za-z])(\d+\.\d[\d.]*[a-zA-Z]?\d*)$', 0),
+        (r'-(\d+)$', 0),
+    ]
+
+    # Pre-compute for already_imported checks
+    clean_library = {utils.clean_str(g.name).lower() for g in globals.games.values()} if globals.games else set()
+    base_dir_str = (globals.settings.default_exe_dir or {}).get(globals.os, '') if globals.settings else ''
+    base_dir = pathlib.Path(base_dir_str) if base_dir_str else None
+
+    def has_exe_in(subdir: pathlib.Path) -> bool:
+        """Return True if any library game has an executable inside subdir."""
+        for game in globals.games.values():
+            for exe in game.executables:
+                if utils.is_uri(exe):
+                    continue
+                p = pathlib.Path(exe)
+                if not p.is_absolute():
+                    if base_dir:
+                        p = base_dir / p
+                    else:
+                        continue
+                try:
+                    p.relative_to(subdir)
+                    return True
+                except ValueError:
+                    pass
+        return False
+
+    for subdir, prefix in game_dirs:
+        folder_name = subdir.name
+        core = PLATFORM_RE.sub('', folder_name)
+
+        version = ""
+        name_end = len(core)
+        for pattern, flags in VERSION_PATTERNS:
+            m = re.search(pattern, core, flags)
+            if m:
+                version = m.group(1)
+                name_end = m.start()
+                break
+
+        raw_name = core[:name_end].rstrip('-_. ')
+        detected_name = re.sub(r'[-_]+', ' ', raw_name).strip()
+        detected_name = re.sub(r'([a-z\d])([A-Z])', r'\1 \2', detected_name)
+        detected_name = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', detected_name)
+        detected_name = re.sub(r'\s+', ' ', detected_name).strip()
+        detected_name = _split_trailing_stop_words(detected_name)
+
+        # Already imported: exe-path check (primary) + clean-name fallback
+        already_imported = (
+            (bool(globals.games) and has_exe_in(subdir))
+            or bool(detected_name and utils.clean_str(detected_name).lower() in clean_library)
+        )
+
+        results.append({
+            'folder_name': prefix + folder_name,
+            'detected_name': detected_name,
+            'raw_name': raw_name,
+            'detected_version': version,
+            'apply': bool(version) and not already_imported,
+            'already_imported': already_imported,
+            # Search state — populated asynchronously
+            'search_results': None,
+            'selected_idx': -1,
+            'is_searching': False,
+            'last_searched_name': '',
+            # Exe detection — populated asynchronously
+            'subdir': subdir,
+            'found_exes': None,
+            'selected_exe_idx': -1,
+            'is_scanning_exes': False,
+        })
+
+    return results

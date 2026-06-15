@@ -658,6 +658,91 @@ def open_search_popup(query: str):
     async_thread.run(_f95zone_run_search())
 
 
+def open_search_popup_for_import(query: str, installed_version: str):
+    """Search popup that adds the chosen game and immediately sets its installed version."""
+    results = None
+    ran_query = query
+    real_query = query
+    categories = [
+        "Games",
+        "Comics",
+        "Animations",
+        "Assets",
+    ]
+    ran_category = category = 0
+    searches = [
+        "Title",
+        "Creator",
+    ]
+    ran_search = search = 0
+    def _popup_content():
+        nonlocal query, category, search
+        imgui.set_next_item_width(globals.gui.scaled(115))
+        changed, category = imgui.combo("###category", category, categories)
+        if changed:
+            async_thread.run(_run_search())
+        imgui.same_line()
+        imgui.set_next_item_width(globals.gui.scaled(85))
+        changed, search = imgui.combo("###search", search, searches)
+        if changed:
+            async_thread.run(_run_search())
+        imgui.same_line()
+        imgui.set_next_item_width(-(imgui.calc_text_size(f"{icons.magnify} Search").x + 2 * imgui.style.frame_padding.x) - imgui.style.item_spacing.x)
+        activated, query = imgui.input_text_with_hint(
+            "###query",
+            "Search threads...",
+            query,
+            flags=imgui.INPUT_TEXT_ENTER_RETURNS_TRUE
+        )
+        imgui.same_line()
+        if imgui.button(f"{icons.magnify} Search") or activated:
+            async_thread.run(_run_search())
+        if real_query != ran_query:
+            imgui.text_disabled("Note: the real search query is different because Latest Updates struggles searching some words/symbols")
+        if results:
+            imgui.text("Click a result to add it, then click Ok.")
+            imgui.text(f"Results for {searches[ran_search].lower()} '{real_query}' in {categories[ran_category].lower()}:")
+        else:
+            imgui.text(f"Searching F95zone for '{real_query}'...")
+            imgui.same_line()
+            imgui.text("Searching..." if results is None else "No results!")
+            return
+        imgui.spacing()
+        for result in results:
+            if result.id in globals.games:
+                imgui.push_disabled()
+            text = result.title
+            if result.creator:
+                text += f" [{result.creator}]"
+            clicked = imgui.selectable(text, False, flags=imgui.SELECTABLE_DONT_CLOSE_POPUPS)[0]
+            if result.id in globals.games:
+                imgui.pop_disabled()
+            if clicked:
+                async_thread.run(callbacks.add_game_with_installed_version(result, installed_version))
+    async def _run_search():
+        nonlocal results, ran_query, real_query, ran_category, ran_search
+        results = None
+        ran_query = query
+        real_query = latest_updates_search_sanitize_query(ran_query)
+        ran_category = category
+        real_category = categories[ran_category].lower()
+        ran_search = search
+        real_search = searches[ran_search].lower()
+        if real_search == "title":
+            real_search = "search"
+        results = await latest_updates_search(real_category, real_search, real_query)
+    footer = f"Installed version will be set to: {installed_version}" if installed_version else ""
+    utils.push_popup(
+        utils.popup, f"Import: {query}",
+        _popup_content,
+        buttons=True,
+        closable=True,
+        outside=False,
+        footer=footer,
+    )
+    async_thread.run(_run_search())
+
+
 async def import_url_shortcut(file: str | pathlib.Path):
     parser = configparser.RawConfigParser()
     threads = []
@@ -940,6 +1025,14 @@ async def full_check(game: Game, last_changed: int):
             if version != old_version:
                 if not game.archived:
                     updated = True
+
+        # If the installed version normalizes to match the latest version, the difference
+        # is cosmetic (e.g. "v" prefix, "Public" suffix). Sync the installed string to the
+        # current F95zone string and clear the update flag.
+        if installed and version and utils.normalize_version(installed) == utils.normalize_version(version):
+            if installed != version:
+                installed = version
+            updated = False
 
         # Don't include name change in popup for simple parsing adjustments
         if breaking_name_parsing:
