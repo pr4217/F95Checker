@@ -303,6 +303,7 @@ class FileDownload:
     name: str
     url: str = ""
     cookies: dict = True
+    headers: dict = None
     checksum: tuple[str, str] = None
     path: pathlib.Path = None
     path_nest_level: int = 0

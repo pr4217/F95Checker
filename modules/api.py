@@ -1514,9 +1514,9 @@ async def download_file(download: FileDownload):
             can_resume = None
             while True:
                 if can_resume and download.total:
-                    headers = {"Range": f"bytes={download.progress}-{download.total}"}
+                    headers = {**(download.headers or {}), "Range": f"bytes={download.progress}-{download.total}"}
                 else:
-                    headers = None
+                    headers = download.headers or None
 
                 async with request(
                     "GET", download.url,

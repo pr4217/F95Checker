@@ -232,6 +232,11 @@ class Columns:
             resizable=False,
             no_header=True,
         )
+        self.download_links = self.Column(
+            self, f"{icons.download} Download",
+            resizable=False,
+            no_header=True,
+        )
         self.open_folder = self.Column(
             self, f"{icons.folder_open_outline} Open Folder",
             resizable=False,
@@ -1622,6 +1627,56 @@ class MainGUI():
                     if game.selected:
                         callbacks.open_game_folder(game)
 
+    def draw_game_download_links_button(self, game: Game, label=""):
+        if not game.downloads:
+            return
+        label = label or f"{icons.download} Download"
+        popup_id = f"##dl_links_{game.id}"
+        if imgui.button(f"{label}##{game.id}"):
+            imgui.open_popup(popup_id)
+            self._suppress_hitbox_click = True  # Prevent underlying cell hitbox from also registering this click
+        self.draw_hover_text("Open a download mirror in the browser", text=None)
+        if imgui.begin_popup(popup_id):
+            # First entry has mirrors → implicit "Regular Downloads" section
+            starts_with_platforms = bool(game.downloads[0][1])
+            shown_regular_header = False
+            has_content = False
+            indent = self.scaled(12)
+            for name, mirrors in game.downloads:
+                if not mirrors:
+                    # Named section header (e.g. "Update Patch 0.02 -> 0.03")
+                    if has_content:
+                        imgui.separator()
+                    imgui.text(name)
+                    has_content = False
+                else:
+                    if starts_with_platforms and not shown_regular_header:
+                        imgui.text("Regular Downloads")
+                        shown_regular_header = True
+                    imgui.text_disabled(name)
+                    imgui.indent(indent)
+                    for mirror_name, link in mirrors:
+                        if not link:
+                            link = game.url
+                        if link.startswith("//"):
+                            icon = icons.link
+                        elif link.startswith(f"{api.f95_host}/masked/"):
+                            icon = icons.domino_mask
+                        elif link.startswith(api.f95_host):
+                            icon = icons.open_in_app
+                        else:
+                            icon = icons.link
+                        if imgui.selectable(f"{icon} {mirror_name}")[0]:
+                            if link.startswith("//"):
+                                callbacks.redirect_xpath_link(game.url, link)
+                            elif link.startswith(f"{api.f95_host}/masked/"):
+                                callbacks.redirect_masked_link(link)
+                            else:
+                                callbacks.open_webpage(link)
+                    imgui.unindent(indent)
+                    has_content = True
+            imgui.end_popup()
+
     def draw_game_id_button(self, game: Game, label="", selectable=False):
         if game.custom:
             imgui.push_disabled()
@@ -2114,6 +2169,8 @@ class MainGUI():
                 imgui.same_line()
                 self.draw_game_copy_link_button(game, f"{icons.content_copy} Link")
                 imgui.same_line()
+                self.draw_game_download_links_button(game, f"{icons.download} Download")
+                imgui.same_line()
                 self.draw_game_more_info_button(game, f"{icons.information_outline} Info", carousel_ids=globals.updated_games_sorted_ids)
 
                 imgui.end_group()
@@ -2274,6 +2331,8 @@ class MainGUI():
             self.draw_game_open_thread_button(game, f"{icons.open_in_new} Thread")
             imgui.same_line()
             self.draw_game_copy_link_button(game, f"{icons.content_copy} Link")
+            imgui.same_line()
+            self.draw_game_download_links_button(game, f"{icons.download} Download")
             imgui.same_line()
             self.draw_game_id_button(game, f"{icons.pound} ID")
             imgui.same_line()
@@ -2508,6 +2567,7 @@ class MainGUI():
                                             callbacks.open_webpage(link)
                                         if imgui.is_item_clicked(imgui.MOUSE_BUTTON_MIDDLE):
                                             callbacks.clipboard_copy(link)
+
                             else:
                                 if can_add_spacing:
                                     imgui.text("")
@@ -3221,7 +3281,8 @@ class MainGUI():
             # Hover = image on refresh button
             self.hovered_game = game
             if imgui.is_item_clicked():
-                self.game_hitbox_click = True
+                if not getattr(self, '_suppress_hitbox_click', False):
+                    self.game_hitbox_click = True
             if self.game_hitbox_click and not imgui.is_mouse_down():
                 self.game_hitbox_click = False
                 if imgui.is_key_down(glfw.KEY_LEFT_SHIFT):
@@ -3246,6 +3307,7 @@ class MainGUI():
                     else:
                         # Left click = open game info popup
                         utils.push_popup(self.draw_game_info_popup, game, self.show_games_ids[self.current_tab].copy())
+        self._suppress_hitbox_click = False  # Reset per-cell after checking; set by Download button click this frame
         # Left click drag = swap if in manual sort mode
         if imgui.begin_drag_drop_source(flags=self.game_hitbox_drag_drop_flags):
             self.game_hitbox_click = False
@@ -3416,6 +3478,8 @@ class MainGUI():
                             self.draw_game_open_thread_button(game, cols.open_thread.name[0])
                         case cols.copy_link.index:
                             self.draw_game_copy_link_button(game, cols.copy_link.name[0])
+                        case cols.download_links.index:
+                            self.draw_game_download_links_button(game, cols.download_links.name[0])
                         case cols.open_folder.index:
                             self.draw_game_open_folder_button(game, cols.open_folder.name[0])
                         case cols.status_standalone.index:
@@ -3634,6 +3698,9 @@ class MainGUI():
             else:
                 # Skip if outside view
                 imgui.dummy(0, frame_height)
+        # Download links (shown regardless of action_items setting)
+        if game.downloads and imgui.is_rect_visible(cell_width, frame_height):
+            self.draw_game_download_links_button(game, f"{icons.download}{' Download' if expand else ''}")
         # Cluster data
         cluster = False
         if game.archived:
